@@ -122,54 +122,86 @@ $app->post('/customurl', function(Request $request) use ($app) {
 });
 
 $app->get('/customurl/{code}', function(Request $request, $code) use($app) {
-    $stmt = $app['db']->prepare('SELECT * FROM custom_urls WHERE code=:code');
-    $stmt->bindValue("code", $code);
-    $stmt->execute();
+    if($request->query->get("token") === getenv('STREAMCENTER_SECRET')) {
+        $stmt = $app['db']->prepare('SELECT * FROM custom_urls WHERE code=:code');
+        $stmt->bindValue("code", $code);
+        $stmt->execute();
 
-    $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
 
-    if ($row != false) {
-        return $app->json(array(
-            'id' => $row['id'],
-            'url' => $row['url'],
-            'generated_date' => $row['generated_date'],
-        ), 200);
-    }
-    else {
-        return $app->json(array(
-            "error" => "Not found",
-            "message" => "The provided code did not match any stored url."
-        ), 404);
-    }
-});
-
-$app->get('/oauth/twitch/{uuid}', function($uuid) use($app) {
-
-    return $app->redirect('https://api.twitch.tv/kraken/oauth2/authorize?response_type=code&client_id='. getenv('TWITCH_CLIENT_ID') .'&redirect_uri=http://streamcenterapp.com/oauth/redirect/twitch&scope=user_read channel_subscriptions user_subscriptions chat_login user_follows_edit&state='. $uuid);
-});
-
-$app->get('/oauth/twitch/{uuid}/{access_code}', function(Request $request, $uuid, $access_code) use($app) {
-
-    $stmt = $app['db']->prepare('SELECT access_token, refreshed_date FROM oauth_requests WHERE uuid=:uuid AND platform=:platform AND access_code=:access_code');
-    $stmt->bindValue("uuid", $uuid);
-    $stmt->bindValue("platform", 'TWITCH');
-    $stmt->bindValue("access_code", $access_code);
-    $stmt->execute();
-
-    $row = $stmt->fetch(PDO::FETCH_ASSOC);
-
-    $app['monolog']->addInfo(sprintf("ACCESS TOKEN REQUEST RESULT : %s", var_export($row, true)));
-
-    if ($row != false) {
-        return $app->json(array(
-            'access_token' => $row['access_token'],
-            'generated_date' => $row['refreshed_date'],
-        ), 200);
+        if ($row != false) {
+            return $app->json(
+                array(
+                    'id' => $row['id'],
+                    'url' => $row['url'],
+                    'generated_date' => $row['generated_date'],
+                ),
+                200
+            );
+        } else {
+            return $app->json(
+                array(
+                    "error" => "Not found",
+                    "message" => "The provided code did not match any stored url."
+                ),
+                404
+            );
+        }
     }
     else {
         return $app->json(array(
             "error" => "Unauthorized",
-            "message" => "Please authenticate at http://streamcenterapp.com/oauth/twitch/{device_uuid} or provide a valid access_code."
+            "message" => "Trying to access protected data from unofficial StreamCenter app."
+        ), 401);
+    }
+});
+
+$app->get('/oauth/twitch/{uuid}', function(Request $request, $uuid) use($app) {
+    if($request->query->get("token") === getenv('STREAMCENTER_SECRET')) {
+        return $app->redirect(
+            'https://api.twitch.tv/kraken/oauth2/authorize?response_type=code&client_id='.getenv(
+                'TWITCH_CLIENT_ID'
+            ).'&redirect_uri=http://streamcenterapp.com/oauth/redirect/twitch&scope=user_read channel_subscriptions user_subscriptions chat_login user_follows_edit&state='.$uuid
+        );
+    }
+    else {
+        return $app->json(array(
+            "error" => "Unauthorized",
+            "message" => "Trying to access protected data from unofficial StreamCenter app."
+        ), 401);
+    }
+});
+
+$app->get('/oauth/twitch/{uuid}/{access_code}', function(Request $request, $uuid, $access_code) use($app) {
+
+    if($request->query->get("token") === getenv('STREAMCENTER_SECRET')){
+        $stmt = $app['db']->prepare('SELECT access_token, refreshed_date FROM oauth_requests WHERE uuid=:uuid AND platform=:platform AND access_code=:access_code');
+        $stmt->bindValue("uuid", $uuid);
+        $stmt->bindValue("platform", 'TWITCH');
+        $stmt->bindValue("access_code", $access_code);
+        $stmt->execute();
+
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+
+        $app['monolog']->addInfo(sprintf("ACCESS TOKEN REQUEST RESULT : %s", var_export($row, true)));
+
+        if ($row != false) {
+            return $app->json(array(
+                'access_token' => $row['access_token'],
+                'generated_date' => $row['refreshed_date'],
+            ), 200);
+        }
+        else {
+            return $app->json(array(
+                "error" => "Unauthorized",
+                "message" => "Please authenticate at http://streamcenterapp.com/oauth/twitch/{device_uuid} or provide a valid access_code."
+            ), 401);
+        }
+    }
+    else {
+        return $app->json(array(
+            "error" => "Unauthorized",
+            "message" => "Trying to access protected data from unofficial StreamCenter app."
         ), 401);
     }
 });
@@ -181,72 +213,78 @@ $app->post('/oauth/twitch/refresh', function(Request $request) use($app) {
 });
 
 $app->get('/oauth/redirect/twitch', function(Request $request) use($app) {
+        $uuid = $request->get('state');
 
-    $uuid = $request->get('state');
+        $postBody = array(
+            'client_id' => getenv('TWITCH_CLIENT_ID'),
+            'client_secret' => getenv('TWITCH_CLIENT_SECRET'),
+            'grant_type' => 'authorization_code',
+            'redirect_uri' => 'http://streamcenterapp.com/oauth/redirect/twitch',
+            'code' => $request->get('code'),
+            'state' => $uuid,
+        );
 
-    $postBody = array(
-        'client_id' => getenv('TWITCH_CLIENT_ID'),
-        'client_secret' => getenv('TWITCH_CLIENT_SECRET'),
-        'grant_type' => 'authorization_code',
-        'redirect_uri' => 'http://streamcenterapp.com/oauth/redirect/twitch',
-        'code' => $request->get('code'),
-        'state' => $uuid,
-    );
+        $ch = curl_init();
+        curl_setopt($ch, CURLOPT_URL, "https://api.twitch.tv/kraken/oauth2/token");
+        curl_setopt($ch, CURLOPT_POST, 1);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, http_build_query($postBody));
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
 
-    $ch = curl_init();
-    curl_setopt($ch, CURLOPT_URL,"https://api.twitch.tv/kraken/oauth2/token");
-    curl_setopt($ch, CURLOPT_POST, 1);
-    curl_setopt($ch, CURLOPT_POSTFIELDS, http_build_query($postBody));
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        $response = json_decode(curl_exec($ch), true);
+        curl_close($ch);
 
-    $response = json_decode(curl_exec($ch), true);
-    curl_close($ch);
-
-    $app['monolog']->addInfo(sprintf("TOKEN RESPONSE : %s", var_export($response, true)));
+        $app['monolog']->addInfo(sprintf("TOKEN RESPONSE : %s", var_export($response, true)));
 
 
-    $accessToken = $response["access_token"];
-    $refreshToken = $response["refresh_token"];
+        $accessToken = $response["access_token"];
+        $refreshToken = $response["refresh_token"];
 
-    //Check if a record exists, if so, replace it
-    $stmt = $app['db']->prepare('SELECT COUNT(*) FROM oauth_requests WHERE uuid=:uuid AND platform=:platform');
-    $stmt->bindValue("uuid", $uuid);
-    $stmt->bindValue("platform", 'TWITCH');
-    $stmt->execute();
-
-    $count = $stmt->fetchColumn(0);
-    $app['monolog']->addInfo("FOUND $count RECORDS FOR UUID: $uuid");
-
-    $accessCode = substr(md5(microtime()),rand(0,26),5);
-    $app['monolog']->addInfo("GENERATED NEW ACCESS CODE: $accessCode FOR UUID: $uuid");
-
-    if($count == 0) {
-        $stmt = $app['db']->prepare('INSERT INTO oauth_requests(uuid, platform, access_token, refresh_token, refreshed_date, access_code) VALUES(:uuid, :platform, :access_token, :refresh_token, :refreshed_date, :access_code)');
+        //Check if a record exists, if so, replace it
+        $stmt = $app['db']->prepare('SELECT COUNT(*) FROM oauth_requests WHERE uuid=:uuid AND platform=:platform');
         $stmt->bindValue("uuid", $uuid);
         $stmt->bindValue("platform", 'TWITCH');
-        $stmt->bindValue("access_token", $accessToken);
-        $stmt->bindValue("refresh_token", $refreshToken);
-        $stmt->bindValue("refreshed_date", new DateTime(), 'datetime');
-        $stmt->bindValue("access_code", $accessCode);
-
         $stmt->execute();
-        $app['monolog']->addInfo("INSERTED NEW TOKEN: $accessToken for UUID: $uuid");
-    } else {
-        $stmt = $app['db']->prepare('UPDATE oauth_requests SET uuid=:uuid, platform=:platform, access_token=:access_token, refresh_token=:refresh_token, refreshed_date=:refreshed_date, access_code=:access_code WHERE uuid=:uuid AND platform=:platform');
-        $stmt->bindValue("uuid", $uuid);
-        $stmt->bindValue("platform", 'TWITCH');
-        $stmt->bindValue("access_token", $accessToken);
-        $stmt->bindValue("refresh_token", $refreshToken);
-        $stmt->bindValue("refreshed_date", new DateTime(), 'datetime');
-        $stmt->bindValue("access_code", $accessCode);
 
-        $stmt->execute();
-        $app['monolog']->addInfo("UPDATED NEW TOKEN: $accessToken for UUID: $uuid");
-    }
+        $count = $stmt->fetchColumn(0);
+        $app['monolog']->addInfo("FOUND $count RECORDS FOR UUID: $uuid");
 
-    return $app['twig']->render('displayCode.twig', array(
-        'accessCode' => $accessCode,
-    ));
+        $accessCode = substr(md5(microtime()), rand(0, 26), 5);
+        $app['monolog']->addInfo("GENERATED NEW ACCESS CODE: $accessCode FOR UUID: $uuid");
+
+        if ($count == 0) {
+            $stmt = $app['db']->prepare(
+                'INSERT INTO oauth_requests(uuid, platform, access_token, refresh_token, refreshed_date, access_code) VALUES(:uuid, :platform, :access_token, :refresh_token, :refreshed_date, :access_code)'
+            );
+            $stmt->bindValue("uuid", $uuid);
+            $stmt->bindValue("platform", 'TWITCH');
+            $stmt->bindValue("access_token", $accessToken);
+            $stmt->bindValue("refresh_token", $refreshToken);
+            $stmt->bindValue("refreshed_date", new DateTime(), 'datetime');
+            $stmt->bindValue("access_code", $accessCode);
+
+            $stmt->execute();
+            $app['monolog']->addInfo("INSERTED NEW TOKEN: $accessToken for UUID: $uuid");
+        } else {
+            $stmt = $app['db']->prepare(
+                'UPDATE oauth_requests SET uuid=:uuid, platform=:platform, access_token=:access_token, refresh_token=:refresh_token, refreshed_date=:refreshed_date, access_code=:access_code WHERE uuid=:uuid AND platform=:platform'
+            );
+            $stmt->bindValue("uuid", $uuid);
+            $stmt->bindValue("platform", 'TWITCH');
+            $stmt->bindValue("access_token", $accessToken);
+            $stmt->bindValue("refresh_token", $refreshToken);
+            $stmt->bindValue("refreshed_date", new DateTime(), 'datetime');
+            $stmt->bindValue("access_code", $accessCode);
+
+            $stmt->execute();
+            $app['monolog']->addInfo("UPDATED NEW TOKEN: $accessToken for UUID: $uuid");
+        }
+
+        return $app['twig']->render(
+            'displayCode.twig',
+            array(
+                'accessCode' => $accessCode,
+            )
+        );
 });
 
 $app->error(function (\Exception $e, $code) use ($app) {
